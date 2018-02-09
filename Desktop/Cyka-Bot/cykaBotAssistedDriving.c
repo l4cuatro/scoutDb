@@ -2,6 +2,7 @@
 #pragma config(Sensor, in2,    liftPot,        sensorPotentiometer)
 #pragma config(Sensor, dgtl1,  lDriveEnc,      sensorQuadEncoder)
 #pragma config(Sensor, dgtl3,  rDriveEnc,      sensorQuadEncoder)
+#pragma config(Sensor, dgtl5,  chainPot,       sensorQuadEncoder)
 #pragma config(Motor,  port1,           lChain,        tmotorVex393_HBridge, openLoop)
 #pragma config(Motor,  port2,           lyDrive,       tmotorVex393HighSpeed_MC29, openLoop, reversed, driveLeft, encoderPort, dgtl1)
 #pragma config(Motor,  port3,           mlDrive,       tmotorVex393HighSpeed_MC29, openLoop, driveLeft, encoderPort, dgtl1)
@@ -63,7 +64,7 @@ typedef struct {
 		integLim;
 } Pid;
 
-Pid* initPid(Pid* pid, float kP, float kI, float kD, float integLim) {
+void initPid(Pid* pid, float kP, float kI, float kD, float integLim) {
 		pid->targ =
 			pid->val =
 			pid->valLast =
@@ -80,13 +81,31 @@ Pid* initPid(Pid* pid, float kP, float kI, float kD, float integLim) {
 		pid->kI = kI;
 		pid->kD = kD;
 		pid->integLim = integLim;
-
-		return pid;
 }
 
 void setTarg(Pid* pid, int targ) {
 	pid->integ = 0;
 	pid->targ = targ;
+}
+
+int upPid(Pid* pid, int val) {
+	pid->timeLast = pid->time;
+	pid->time = nSysTime;
+	pid->dt = pid->time - pid->timeLast;
+	pid->valLast = pid->val;
+	pid->val = val;
+	pid->errLast = pid->err;
+	pid->err = pid->targ - pid->val;
+
+	pid->prop = pid->kP * pid->err;
+	pid->integ += pid->kI * pid->err;
+	if(fabs(pid->integ) > fabs(pid->integLim))
+		pid->integ = fabs(pid->integLim) * sgn(pid->integ);
+	pid->deriv = (pid->err - pid->errLast) * (20.0 * pid->kD / pid->dt);
+	pid->out = round(pid->prop + pid->integ + pid->deriv);
+	if(fabs(pid->out) > 127)
+		pid->out = 127 * sgn(pid->out);
+	return pid->out;
 }
 
 Pid Pids[5];
@@ -100,10 +119,19 @@ float ks[5][3] = {
 
 task main() {
 	static short sticks[4],
-		mtrPwrs[5];
+		mtrPwrs[5],
+		stackHeight = 0;
+	static float liftTargCoeff = 300; //Factor to multiply by cone count
+	static word lastBtn8L = 0,
+		lastBtn8R = 0,
+		lastBtn7L = 0,
+		lastBtn7R = 0;
+	static bool flip = false,
+		liftPidEnable = false;
+
 
 	for(int i = 0; i < 5; i++) {
-		initPid((Pids+1),
+		initPid(&Pids[i], ks[i][0], ks[i][1], ks[i][2], 127);
 	}
 
 	while(true) {
@@ -114,13 +142,30 @@ task main() {
 				sticks[i] = 0;
 		}
 
+		if((vexRT[Btn8L] && !lastBtn8L) ^ (vexRT[Btn8R] && !lastBtn8R)) {
+			if(vexRT[Btn8L])
+				stackHeight++;
+			else
+				stackHeight--;
+		}
+
+		if(vexRT[Btn7L] && !lastBtn7L)
+			liftPidEnable = !liftPidEnable;
+		if(vexRT[Btn7R] && !lastBtn7R)
+			flip = !flip;
+
+		setTarg(&Pids[LIFT], stackHeight * liftTargCoeff);
+
 		mtrPwrs[L_DRIVE] = sticks[LY] + sticks[RX];
 		mtrPwrs[R_DRIVE] = sticks[LY] - sticks[RX];
-		mtrPwrs[LIFT] = (vexRT[Btn5U] ^ vexRT[Btn5D])
-			? (vexRT[Btn5U])
-				? 127
-				: -127
-			: 0;
+		if(liftPidEnable)
+			mtrPwrs[LIFT] = upPid(&Pids[LIFT], SensorValue[liftPot]);
+		else
+			mtrPwrs[LIFT] = (vexRT[Btn5U] ^ vexRT[Btn5D])
+				? (vexRT[Btn5U])
+					? 127
+					: -127
+				: 0;
 		mtrPwrs[CHAIN] = (vexRT[Btn6U] ^ vexRT[Btn6D])
 			? (vexRT[Btn6U])
 				? 127
@@ -132,10 +177,18 @@ task main() {
 				: -127
 			: 0;
 
-		setDrive(mtrPwrs[L_DRIVE], mtrPwrs[R_DRIVE]);
+		if(flip)
+			setDrive(-mtrPwrs[R_DRIVE], -mtrPwrs[L_DRIVE]);
+		else
+			setDrive(mtrPwrs[L_DRIVE], mtrPwrs[R_DRIVE]);
 		setLift(mtrPwrs[LIFT]);
 		setChain(mtrPwrs[CHAIN]);
 		setGoal(mtrPwrs[GOAL]);
+
+		lastBtn8L = vexRT[Btn8L];
+		lastBtn8R = vexRT[Btn8R];
+		lastBtn7L = vexRT[Btn7L];
+		lastBtn7R = vexRT[Btn7R];
 
 		wait1Msec(20);
 
